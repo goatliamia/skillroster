@@ -9085,6 +9085,15 @@ fn messy_report_surfaces_agent_actionability_and_reversibility() {
         assert!(finding["actionability"].is_string());
         assert!(finding["reversibility"].is_string());
     }
+    let summary_roster = summary["result"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["kind"] == "large_default_roster")
+        .unwrap();
+    let roster_id = summary_roster["id"].as_str().unwrap();
+    assert_eq!(summary_roster["actionability"], "plan_available");
+    assert_eq!(summary_roster["reversibility"], "undo_after_apply");
 
     let findings = json_output(&run(
         &[&common[..], &["report", "--findings"]].concat(),
@@ -9111,6 +9120,18 @@ fn messy_report_surfaces_agent_actionability_and_reversibility() {
     );
     assert_eq!(divergent["actionability"], "review_required");
     assert_eq!(divergent["reversibility"], "manual_only");
+    let listed_roster = items
+        .iter()
+        .find(|finding| finding["id"] == roster_id)
+        .unwrap();
+    assert_eq!(
+        listed_roster["actionability"],
+        summary_roster["actionability"]
+    );
+    assert_eq!(
+        listed_roster["reversibility"],
+        summary_roster["reversibility"]
+    );
 
     let duplicate_detail = json_output(&run(
         &[
@@ -9131,6 +9152,20 @@ fn messy_report_surfaces_agent_actionability_and_reversibility() {
     assert_eq!(
         duplicate_detail["result"]["reversibility"],
         "undo_after_apply"
+    );
+    let roster_detail = json_output(&run(
+        &[&common[..], &["report", "--finding", roster_id]].concat(),
+        None,
+    ));
+    assert_eq!(roster_detail["result"]["actionability"], "plan_available");
+    assert_eq!(roster_detail["result"]["reversibility"], "undo_after_apply");
+    assert_eq!(
+        roster_detail["result"]["actionability"],
+        summary_roster["actionability"]
+    );
+    assert_eq!(
+        roster_detail["result"]["reversibility"],
+        summary_roster["reversibility"]
     );
 
     let human_common = [

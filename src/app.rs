@@ -2477,6 +2477,7 @@ fn report_command(
                 &scan,
                 &full_affected_skill_ids,
                 &full_affected_placement_ids,
+                None,
             );
             object.insert(
                 "detail".into(),
@@ -2517,7 +2518,7 @@ fn report_command(
                 .iter()
                 .map(|reference| evidence_id(&scan_id, reference))
                 .collect::<Result<Vec<_>>>()?;
-            Ok(FindingRecord {
+            let mut record = FindingRecord {
                 details: finding_json(&id, finding, &evidence_ids, &scan),
                 id,
                 report_id: report_id.clone(),
@@ -2526,7 +2527,30 @@ fn report_command(
                 title: finding.title.clone(),
                 summary: finding.summary.clone(),
                 evidence_ids,
-            })
+            };
+            let planning = finding_roster_planning_decision(
+                store, &record, &scan_id, &scan_id, &scan, state_dir,
+            )?;
+            if let Some(object) = record.details.as_object_mut() {
+                let affected_skill_ids = finding
+                    .affected_skill_ids
+                    .iter()
+                    .map(|id| json!(id))
+                    .collect::<Vec<_>>();
+                let affected_placement_ids = finding
+                    .affected_placement_ids
+                    .iter()
+                    .map(|id| json!(id))
+                    .collect::<Vec<_>>();
+                refresh_finding_decision_facts(
+                    object,
+                    &scan,
+                    &affected_skill_ids,
+                    &affected_placement_ids,
+                    planning.as_ref(),
+                );
+            }
+            Ok(record)
         })
         .collect::<Result<Vec<_>>>()?;
     let full_findings = findings
@@ -2624,6 +2648,20 @@ fn report_supports_finding_decision_fields(report: &ReportRecord) -> bool {
                 .get("reversibility")
                 .and_then(Value::as_str)
                 .is_some()
+            && match crate::query::finding_kind_from_stored_value(
+                finding.get("kind"),
+                finding.get("title").and_then(Value::as_str).unwrap_or(""),
+            ) {
+                Some(crate::query::FindingKind::LargeDefaultRoster) => matches!(
+                    (
+                        finding.get("actionability").and_then(Value::as_str),
+                        finding.get("reversibility").and_then(Value::as_str),
+                    ),
+                    (Some("plan_available"), Some("undo_after_apply"))
+                        | (Some("blocked"), Some("not_governable"))
+                ),
+                _ => true,
+            }
     })
 }
 
@@ -2840,6 +2878,7 @@ fn refresh_finding_decision_facts(
     scan: &ScanResult,
     affected_skill_ids: &[Value],
     affected_placement_ids: &[Value],
+    planning_override: Option<&Value>,
 ) {
     let skill_ids = affected_skill_ids
         .iter()
@@ -2855,12 +2894,13 @@ fn refresh_finding_decision_facts(
         object.get("kind"),
         object.get("title").and_then(Value::as_str).unwrap_or(""),
     );
+    let planning = planning_override.or_else(|| object.get("planning"));
     let (affected_agents, state) = finding_decision_facts(
         kind,
         &skill_ids,
         &placement_ids,
         scan,
-        object.get("planning"),
+        planning,
         object.get("resolution"),
         object.get("comparison"),
     );
@@ -4319,6 +4359,36 @@ fn source_confirmation_finding_reference(
     Ok(reference)
 }
 
+#[derive(Clone, Copy)]
+struct FindingRosterPlanningOptions {
+    full: bool,
+    decision_facts_only: bool,
+}
+
+fn finding_roster_planning_decision(
+    store: &StateStore,
+    finding: &FindingRecord,
+    scan_id: &ScanId,
+    latest_scan_id: &ScanId,
+    scan: &ScanResult,
+    state_dir: &Path,
+) -> Result<Option<Value>> {
+    // Probe the same planning gates used by detail output without resolving
+    // report-linked continuation data before the new Report is persisted.
+    finding_roster_planning_impl(
+        store,
+        finding,
+        scan_id,
+        latest_scan_id,
+        scan,
+        state_dir,
+        FindingRosterPlanningOptions {
+            full: false,
+            decision_facts_only: true,
+        },
+    )
+}
+
 fn finding_roster_planning(
     store: &StateStore,
     finding: &FindingRecord,
@@ -4328,6 +4398,33 @@ fn finding_roster_planning(
     state_dir: &Path,
     full: bool,
 ) -> Result<Option<Value>> {
+    finding_roster_planning_impl(
+        store,
+        finding,
+        scan_id,
+        latest_scan_id,
+        scan,
+        state_dir,
+        FindingRosterPlanningOptions {
+            full,
+            decision_facts_only: false,
+        },
+    )
+}
+
+fn finding_roster_planning_impl(
+    store: &StateStore,
+    finding: &FindingRecord,
+    scan_id: &ScanId,
+    latest_scan_id: &ScanId,
+    scan: &ScanResult,
+    state_dir: &Path,
+    options: FindingRosterPlanningOptions,
+) -> Result<Option<Value>> {
+    let FindingRosterPlanningOptions {
+        full,
+        decision_facts_only,
+    } = options;
     if !crate::roster_recommendation::is_large_roster_finding(finding) {
         return Ok(None);
     }
@@ -4417,6 +4514,9 @@ fn finding_roster_planning(
         })
         .collect::<Vec<_>>();
     let blocked_change_count = supported.exclusions.len();
+    if decision_facts_only && blocked_change_count > 0 {
+        return Ok(Some(json!({"supported": false})));
+    }
     let blocked_changes = supported
         .exclusions
         .iter()
@@ -4593,6 +4693,9 @@ fn finding_roster_planning(
         if let Some(conflict) =
             error.downcast_ref::<crate::roster_plan::RosterLibraryTargetClaimConflict>()
         {
+            if decision_facts_only {
+                return Ok(Some(json!({"supported": false})));
+            }
             let conflict_skill_ids = conflict
                 .claimants
                 .iter()
@@ -4678,6 +4781,9 @@ fn finding_roster_planning(
             })));
         }
         return Err(error);
+    }
+    if decision_facts_only {
+        return Ok(Some(json!({"supported": true})));
     }
     Ok(Some(json!({
         "supported": true,
@@ -11076,6 +11182,31 @@ mod recovery_tests {
         report.summary["findings"][0]["kind"] =
             json!(crate::query::FindingKind::EscapingLinkSourceConfirmation);
         assert!(report_supports_source_confirmation_kind(&report));
+    }
+
+    #[test]
+    fn legacy_large_roster_decision_facts_require_report_rebuild() {
+        let mut report = ReportRecord {
+            id: ReportId::new(),
+            scan_id: ScanId::new(),
+            created_at: 0,
+            summary: json!({
+                "findings": [{
+                    "kind": "large_default_roster",
+                    "affected_agents": [],
+                    "actionability": "review_required",
+                    "reversibility": "manual_only"
+                }]
+            }),
+        };
+
+        assert!(!report_supports_finding_decision_fields(&report));
+        report.summary["findings"][0]["actionability"] = json!("plan_available");
+        report.summary["findings"][0]["reversibility"] = json!("undo_after_apply");
+        assert!(report_supports_finding_decision_fields(&report));
+        report.summary["findings"][0]["actionability"] = json!("blocked");
+        report.summary["findings"][0]["reversibility"] = json!("not_governable");
+        assert!(report_supports_finding_decision_fields(&report));
     }
 
     #[test]
