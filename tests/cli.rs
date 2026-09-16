@@ -9039,6 +9039,84 @@ fn exact_duplicate_finding_prepares_library_plan_from_semantic_choices() {
 }
 
 #[test]
+fn large_roster_report_survives_an_existing_library_target() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("home");
+    let state = temp.path().join("state");
+    for index in 0..52 {
+        let name = format!("skill-{index:02}");
+        let directory = home.join(".codex/skills").join(&name);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: capability {index}\n---\nbody {index}\n"),
+        )
+        .unwrap();
+        let target = state.join("library").join(&name);
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("user.txt"), "existing user content").unwrap();
+    }
+    let common = [
+        "--home",
+        home.to_str().unwrap(),
+        "--state-dir",
+        state.to_str().unwrap(),
+        "--json",
+    ];
+    json_output(&run(&[&common[..], &["scan"]].concat(), None));
+    let summary = json_output(&run(&[&common[..], &["report"]].concat(), None));
+    let finding = summary["result"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["kind"] == "large_default_roster")
+        .unwrap();
+    let id = finding["id"].as_str().unwrap();
+    assert_eq!(finding["actionability"], "blocked");
+    assert_eq!(finding["reversibility"], "not_governable");
+    let listed = json_output(&run(
+        &[&common[..], &["report", "--findings"]].concat(),
+        None,
+    ));
+    let listed_finding = listed["result"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["id"] == id)
+        .unwrap();
+    assert_eq!(listed_finding["actionability"], "blocked");
+    let detail = json_output(&run(
+        &[&common[..], &["report", "--finding", id]].concat(),
+        None,
+    ));
+    assert_eq!(detail["result"]["actionability"], "blocked");
+    assert_eq!(detail["result"]["planning"]["supported"], false);
+    assert_eq!(
+        detail["result"]["planning"]["reason"],
+        "roster_plan_preconditions_failed"
+    );
+    assert!(
+        detail["result"]["planning"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("already exists")
+    );
+    for index in 0..52 {
+        let name = format!("skill-{index:02}");
+        assert!(
+            home.join(".codex/skills")
+                .join(&name)
+                .join("SKILL.md")
+                .is_file()
+        );
+        assert_eq!(
+            fs::read_to_string(state.join("library").join(name).join("user.txt")).unwrap(),
+            "existing user content"
+        );
+    }
+}
+
+#[test]
 fn messy_report_surfaces_agent_actionability_and_reversibility() {
     let temp = TempDir::new().unwrap();
     let home = temp.path().join("home");

@@ -4780,7 +4780,16 @@ fn finding_roster_planning_impl(
                 "state_files_changed": false
             })));
         }
-        return Err(error);
+        // A rejected candidate Plan is a Finding blocker, not a failure to
+        // read the Report. Keep the same decision in summary and detail views.
+        return Ok(Some(json!({
+            "supported": false,
+            "reason": "roster_plan_preconditions_failed",
+            "detail": error.to_string(),
+            "snapshot_id": scan_id,
+            "files_changed": false,
+            "state_files_changed": false
+        })));
     }
     if decision_facts_only {
         return Ok(Some(json!({"supported": true})));
